@@ -2,12 +2,22 @@ import sqlite3
 import pandas as pd
 import os
 
+# -------------------------------------------------
+# DATABASE PATH (PORTABLE & SAFE)
+# -------------------------------------------------
 
-DB_PATH = r"D:\trailnew\automated_reminder_system-main\database\reminders.db"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_DIR = os.path.join(BASE_DIR, "database")
+DB_PATH = os.path.join(DB_DIR, "reminders.db")
 
 def connect_db():
+    # Ensure database directory exists
+    os.makedirs(DB_DIR, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
+# -------------------------------------------------
+# DATABASE TABLE CREATION
+# -------------------------------------------------
 
 def create_tables():
     conn = connect_db()
@@ -55,9 +65,13 @@ def create_tables():
     conn.close()
     print("✅ Tables verified or created successfully.")
 
+# -------------------------------------------------
+# VIEW FUNCTIONS
+# -------------------------------------------------
 
 def view_all():
     conn = connect_db()
+
     print("\n=== Students Table ===")
     print(pd.read_sql_query("SELECT * FROM students", conn))
 
@@ -66,24 +80,31 @@ def view_all():
 
     print("\n=== Assignments Table ===")
     print(pd.read_sql_query("SELECT * FROM assignments", conn))
+
     conn.close()
 
-
 def view_by_course():
-    course = input("Enter course name (e.g., DSA, CyberSecurity, FullStack): ")
-    batch_name = input("Enter batch name (optional): ")
-    year = input("Enter year (optional): ")
-    mode = input("Enter mode (Online/Offline, optional): ")
+    course = input("Enter course name (e.g., DSA, CyberSecurity, FullStack): ").strip()
+    batch_name = input("Enter batch name (optional, e.g., B4): ").strip()
+    year = input("Enter year (optional, e.g., 2024 or 2025): ").strip()
+    mode = input("Enter mode (Online/Offline, optional): ").strip()
 
     query = f"SELECT * FROM students WHERE course = '{course}'"
+
     if batch_name:
         query += f" AND batch_name = '{batch_name}'"
+
     if year:
-        query += f" AND year = {year}"
+        if year.isdigit():
+            query += f" AND year = {year}"
+        else:
+            print("⚠️ Invalid year entered. Year must be numeric. Ignoring year filter.")
+
     if mode:
         query += f" AND mode = '{mode}'"
 
     conn = connect_db()
+
     print(f"\n=== Students Enrolled in {course} ===")
     print(pd.read_sql_query(query, conn))
 
@@ -92,8 +113,12 @@ def view_by_course():
 
     print(f"\n=== Assignments for {course} ===")
     print(pd.read_sql_query(query.replace("students", "assignments"), conn))
+
     conn.close()
 
+# -------------------------------------------------
+# MENU
+# -------------------------------------------------
 
 def menu():
     create_tables()
@@ -116,6 +141,9 @@ def menu():
         else:
             print("❌ Invalid choice, please try again!")
 
+# -------------------------------------------------
+# ENTRY POINT
+# -------------------------------------------------
 
 if __name__ == "__main__":
     menu()

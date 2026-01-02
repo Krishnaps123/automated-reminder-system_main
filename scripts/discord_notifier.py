@@ -7,24 +7,7 @@ import discord
 from dotenv import load_dotenv
 import ssl
 import aiohttp
-
-# ============================================================
-# SENT REMINDER LOG
-# ============================================================
-SENT_LOG_PATH = "sent_discord_reminders.log"
-
-def load_sent_log():
-    if os.path.exists(SENT_LOG_PATH):
-        with open(SENT_LOG_PATH, "r") as f:
-            return set(line.strip() for line in f)
-    return set()
-
-def save_sent_log(sent):
-    with open(SENT_LOG_PATH, "w") as f:
-        for k in sorted(sent):
-            f.write(k + "\n")
-
-sent_reminders = load_sent_log()
+import pytz
 
 # ============================================================
 # LOAD ENV
@@ -32,11 +15,35 @@ sent_reminders = load_sent_log()
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 DB_PATH = os.getenv("DB_PATH")
 
-if not TOKEN or not CHANNEL_ID or not DB_PATH:
-    raise ValueError("❌ Missing .env values")
+if not TOKEN:
+    raise ValueError("❌ DISCORD_TOKEN missing in .env")
+if not DB_PATH or not os.path.exists(DB_PATH):
+    raise ValueError("❌ DB_PATH invalid or missing")
+
+# ============================================================
+# TIMEZONE
+# ============================================================
+IST = pytz.timezone("Asia/Kolkata")
+
+# ============================================================
+# SENT LOG
+# ============================================================
+SENT_LOG_PATH = "sent_discord_reminders.log"
+
+def load_sent():
+    if os.path.exists(SENT_LOG_PATH):
+        with open(SENT_LOG_PATH) as f:
+            return set(line.strip() for line in f)
+    return set()
+
+def save_sent(sent):
+    with open(SENT_LOG_PATH, "w") as f:
+        for k in sorted(sent):
+            f.write(k + "\n")
+
+sent_reminders = load_sent()
 
 # ============================================================
 # DISCORD BOT
@@ -60,12 +67,40 @@ def get_assignments():
     return fetch_df("SELECT * FROM assignments")
 
 # ============================================================
+# CHANNEL RESOLVER
+# ============================================================
+async def get_channel_for_row(row):
+    year = str(row.get("year", "")).strip()
+    if "2025" not in year:
+        return None
+
+    course = str(row.get("course", "")).strip()
+    batch = str(row.get("batch_name", "")).strip()
+    mode = str(row.get("mode", "")).strip()
+
+    key = "_".join([course, batch, year, mode]).upper().replace(" ", "_")
+    env_key = f"DISCORD_{key}"
+
+    channel_id = os.getenv(env_key)
+    print("DEBUG CHANNEL KEY:", env_key, "→", channel_id)
+
+    if not channel_id:
+        print("❌ Missing ENV:", env_key)
+        return None
+
+    try:
+        return await bot.fetch_channel(int(channel_id))
+    except Exception as e:
+        print("❌ Channel fetch failed:", e)
+        return None
+
+# ============================================================
 # SEND MESSAGE
 # ============================================================
 async def send_message(channel, message):
     try:
         await channel.send(message)
-        print("✅ Sent reminder")
+        print(f"✅ Sent to #{channel.name}")
     except Exception as e:
         print("❌ Discord send error:", e)
 
@@ -74,140 +109,93 @@ async def send_message(channel, message):
 # ============================================================
 async def reminder_loop():
     await bot.wait_until_ready()
-    channel = bot.get_channel(CHANNEL_ID)
-
-    if not channel:
-        print("❌ Channel not found")
-        return
-
     print("🔁 Discord Reminder System Started")
 
     while not bot.is_closed():
-        now = datetime.now()
+        now = datetime.now(IST)
 
-        # ====================================================
-        # CLASS REMINDERS (60 / 30 / 2 MIN)
-        # ====================================================
-        classes_df = get_classes()
+        # ================= CLASS REMINDERS =================
+        for _, row in get_classes().iterrows():
+            channel = await get_channel_for_row(row)
+            if not channel:
+                continue
 
-        for _, row in classes_df.iterrows():
-            try:
-                class_dt = pd.to_datetime(
-                    f"{row['date']} {row['time']}",
-                    errors="coerce"
-                )
+            class_dt = pd.to_datetime(
+                f"{row['date']} {row['time']}",
+                errors="coerce"
+            )
+            if pd.isna(class_dt):
+                continue
 
-                if pd.isna(class_dt):
+            # ✅ FIX: DB time is already IST (do NOT localize again)
+            class_dt = class_dt.replace(tzinfo=IST)
+
+            minutes_left = (class_dt - now).total_seconds() / 60
+
+            reminders = [
+                (45, 75, "60", "⏰ **Class Reminder (1 Hour Left)**"),
+                (20, 40, "30", "⏰ **Class Reminder (30 Minutes Left)**"),
+                (0, 5,  "2",  "🚀 **Class Starting Soon**"),
+            ]
+
+            for lo, hi, tag, title in reminders:
+                if not (lo <= minutes_left <= hi):
                     continue
 
-                minutes_left = (class_dt - now).total_seconds() / 60
-
-                print(
-                    f"[DEBUG] Class '{row['session_name']}' "
-                    f"starts in {minutes_left:.2f} minutes"
-                )
-
-                # -------- 1 HOUR BEFORE --------
-                if 55 <= minutes_left <= 65:
-                    key = f"class-60-{row['session_name']}-{row['date']}"
-                    if key not in sent_reminders:
-                        msg = (
-                            f"⏰ **Class Reminder (1 Hour Left)**\n\n"
-                            f"📘 {row['session_name']}\n"
-                            f"📚 {row['course']}\n"
-                            f"👥 {row.get('batch_name','')} ({row.get('mode','')})\n"
-                            f"🕒 Starts at {row['time']}"
-                        )
-                        await send_message(channel, msg)
-                        sent_reminders.add(key)
-
-                # -------- 30 MIN BEFORE --------
-                if 25 <= minutes_left <= 35:
-                    key = f"class-30-{row['session_name']}-{row['date']}"
-                    if key not in sent_reminders:
-                        msg = (
-                            f"⏰ **Class Reminder (30 Minutes Left)**\n\n"
-                            f"📘 {row['session_name']}\n"
-                            f"📚 {row['course']}\n"
-                            f"👥 {row.get('batch_name','')} ({row.get('mode','')})\n"
-                            f"🕒 Starts at {row['time']}"
-                        )
-                        await send_message(channel, msg)
-                        sent_reminders.add(key)
-
-                # -------- 2 MIN BEFORE --------
-                if 0 <= minutes_left <= 3:
-                    key = f"class-2-{row['session_name']}-{row['date']}"
-                    if key not in sent_reminders:
-                        msg = (
-                            f"🚀 **Class Starting Soon (2 Minutes!)**\n\n"
-                            f"📘 {row['session_name']}\n"
-                            f"📚 {row['course']}\n"
-                            f"👥 {row.get('batch_name','')} ({row.get('mode','')})\n"
-                            f"🎓 Join now!"
-                        )
-                        await send_message(channel, msg)
-                        sent_reminders.add(key)
-
-            except Exception as e:
-                print("⚠️ Class reminder error:", e)
-
-        # ====================================================
-        # ASSIGNMENT REMINDERS (60 / 30 / 15 MIN)
-        # ====================================================
-        assignments_df = get_assignments()
-
-        for _, row in assignments_df.iterrows():
-            try:
-                due_dt = pd.to_datetime(row["due_date"], errors="coerce")
-                if pd.isna(due_dt):
+                key = f"class-{tag}-{row['session_name']}-{row['date']}-{channel.id}"
+                if key in sent_reminders:
                     continue
 
-                minutes_left = (due_dt - now).total_seconds() / 60
+                await send_message(
+                    channel,
+                    f"{title}\n\n"
+                    f"📘 {row['session_name']}\n"
+                    f"📚 {row['course']}\n"
+                    f"👥 {row['batch_name']} {row['year']} ({row['mode']})\n"
+                    f"🕒 Starts at {row['time']}"
+                )
+                sent_reminders.add(key)
 
-                for m in (60, 30, 15):
-                    if not (m - 2 <= minutes_left <= m + 2):
-                        continue
+        # ================= ASSIGNMENT REMINDERS =================
+        for _, row in get_assignments().iterrows():
+            channel = await get_channel_for_row(row)
+            if not channel:
+                continue
 
-                    key = f"assign-{row['subject']}-{m}"
-                    if key in sent_reminders:
-                        continue
+            due_dt = pd.to_datetime(row["due_date"], errors="coerce")
+            if pd.isna(due_dt):
+                continue
 
-                    msg = (
-                        f"📝 **Assignment Reminder**\n\n"
-                        f"📌 {row['subject']}\n"
-                        f"📚 {row['course']}\n"
-                        f"👥 {row.get('batch_name','')} ({row.get('mode','')})\n"
-                        f"⏳ {m} minutes remaining"
-                    )
-                    await send_message(channel, msg)
-                    sent_reminders.add(key)
+            # ✅ SAME FIX HERE
+            due_dt = due_dt.replace(tzinfo=IST)
 
-            except Exception as e:
-                print("⚠️ Assignment reminder error:", e)
+            minutes_left = (due_dt - now).total_seconds() / 60
 
-        save_sent_log(sent_reminders)
-        await asyncio.sleep(10)
+            for m in (60, 30, 15):
+                if not (m - 10 <= minutes_left <= m + 10):
+                    continue
 
-# ============================================================
-# DISCORD EVENTS
-# ============================================================
-@bot.event
-async def on_ready():
-    print(f"🤖 Logged in as {bot.user}")
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel:
-        await channel.send("✅ Discord Reminder Bot Online")
+                key = f"assign-{row['subject']}-{row['due_date']}-{m}-{channel.id}"
+                if key in sent_reminders:
+                    continue
 
-@bot.event
-async def setup_hook():
-    asyncio.create_task(reminder_loop())
+                await send_message(
+                    channel,
+                    f"📝 **Assignment Reminder**\n\n"
+                    f"📌 {row['subject']}\n"
+                    f"📚 {row['course']}\n"
+                    f"👥 {row['batch_name']} {row['year']} ({row['mode']})\n"
+                    f"⏳ {m} minutes remaining"
+                )
+                sent_reminders.add(key)
+
+        save_sent(sent_reminders)
+        await asyncio.sleep(15)
 
 # ============================================================
 # SSL PATCH
 # ============================================================
 original_init = aiohttp.ClientSession.__init__
-
 def patched_init(self, *args, **kwargs):
     if "connector" not in kwargs:
         ctx = ssl.create_default_context()
@@ -219,6 +207,15 @@ def patched_init(self, *args, **kwargs):
 aiohttp.ClientSession.__init__ = patched_init
 
 # ============================================================
-# RUN BOT
+# RUN
 # ============================================================
-bot.run(TOKEN)
+@bot.event
+async def on_ready():
+    print(f"🤖 Logged in as {bot.user}")
+
+async def main():
+    async with bot:
+        asyncio.create_task(reminder_loop())
+        await bot.start(TOKEN)
+
+asyncio.run(main())

@@ -1,13 +1,13 @@
+
 import sqlite3
 import pandas as pd
 import os
 
 # ----------------------------------------------------------
-# Paths (update these if needed)
+# Paths
 # ----------------------------------------------------------
 DB_PATH = r"D:\trailnew\automated_reminder_system-main\database\reminders.db"
 DATA_DIR = r"D:\trailnew\automated_reminder_system-main\data"
-
 
 
 # ----------------------------------------------------------
@@ -73,12 +73,10 @@ def create_tables():
 def import_students(course, batch, year, mode, file_path):
     print(f"📥 Importing students from {file_path} ...")
     conn = connect_db()
-    cursor = conn.cursor()
 
     try:
         df = pd.read_excel(file_path, sheet_name="students")
-    except Exception as e:
-        print(f"⚠️ No 'students' sheet in {file_path}: {e}")
+    except Exception:
         conn.close()
         return
 
@@ -91,7 +89,10 @@ def import_students(course, batch, year, mode, file_path):
     df["year"] = year
     df["mode"] = mode
 
-    cursor.execute("DELETE FROM students WHERE course=? AND batch_name=? AND year=?", (course, batch, year))
+    conn.execute(
+        "DELETE FROM students WHERE course=? AND batch_name=? AND year=?",
+        (course, batch, year)
+    )
     conn.commit()
 
     df.to_sql("students", conn, if_exists="append", index=False)
@@ -105,19 +106,17 @@ def import_students(course, batch, year, mode, file_path):
 def import_classes(course, batch, year, mode, file_path):
     print(f"📘 Importing classes from {file_path} ...")
     conn = connect_db()
-    cursor = conn.cursor()
 
     try:
         df = pd.read_excel(file_path, sheet_name="schedule")
-    except Exception as e:
-        print(f"⚠️ No 'schedule' sheet in {file_path}: {e}")
+    except Exception:
         conn.close()
         return
 
-    df.columns = [c.strip().lower() for c in df.columns]
     if "class_id" in df.columns:
         df = df.drop(columns=["class_id"])
 
+    df.columns = [c.strip().lower() for c in df.columns]
     df["course"] = course
     df["batch_name"] = batch
     df["year"] = year
@@ -128,17 +127,18 @@ def import_classes(course, batch, year, mode, file_path):
     def parse_time(val):
         if pd.isna(val):
             return "09:00"
-        val = str(val).strip().split('.')[0]
-        for fmt in ("%H:%M", "%H:%M:%S"):
-            try:
-                return pd.to_datetime(val, format=fmt).strftime("%H:%M")
-            except:
-                continue
-        return "09:00"
+        val = str(val).split(".")[0]
+        try:
+            return pd.to_datetime(val).strftime("%H:%M")
+        except:
+            return "09:00"
 
     df["time"] = df["time"].apply(parse_time)
 
-    cursor.execute("DELETE FROM classes WHERE course=? AND batch_name=? AND year=?", (course, batch, year))
+    conn.execute(
+        "DELETE FROM classes WHERE course=? AND batch_name=? AND year=?",
+        (course, batch, year)
+    )
     conn.commit()
 
     df.to_sql("classes", conn, if_exists="append", index=False)
@@ -152,19 +152,17 @@ def import_classes(course, batch, year, mode, file_path):
 def import_assignments(course, batch, year, mode, file_path):
     print(f"📗 Importing assignments from {file_path} ...")
     conn = connect_db()
-    cursor = conn.cursor()
 
     try:
         df = pd.read_excel(file_path, sheet_name="assignment")
-    except Exception as e:
-        print(f"⚠️ No 'assignment' sheet in {file_path}: {e}")
+    except Exception:
         conn.close()
         return
 
-    df.columns = [c.strip().lower() for c in df.columns]
     if "assignment_id" in df.columns:
         df = df.drop(columns=["assignment_id"])
 
+    df.columns = [c.strip().lower() for c in df.columns]
     df["course"] = course
     df["batch_name"] = batch
     df["year"] = year
@@ -172,7 +170,10 @@ def import_assignments(course, batch, year, mode, file_path):
 
     df["due_date"] = pd.to_datetime(df["due_date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    cursor.execute("DELETE FROM assignments WHERE course=? AND batch_name=? AND year=?", (course, batch, year))
+    conn.execute(
+        "DELETE FROM assignments WHERE course=? AND batch_name=? AND year=?",
+        (course, batch, year)
+    )
     conn.commit()
 
     df.to_sql("assignments", conn, if_exists="append", index=False)
@@ -181,26 +182,29 @@ def import_assignments(course, batch, year, mode, file_path):
 
 
 # ----------------------------------------------------------
-# Import all Excel files automatically
+# Import all Excel files
 # ----------------------------------------------------------
 def import_all_courses():
     create_tables()
 
     for file in os.listdir(DATA_DIR):
+
+        # only Excel files
         if not file.endswith(".xlsx"):
             continue
 
+        # skip internal tracking file
+        if file.lower() == "sent_reminders.xlsx":
+            continue
+
         try:
-            # Example: CyberSecurity_B2_2025_online.xlsx
             base = file.replace(".xlsx", "")
             parts = base.split("_")
 
-            # Handle missing parts safely
-            course = parts[0] if len(parts) > 0 else "Unknown"
-            batch = parts[1] if len(parts) > 1 else "B1"
-            year = parts[2] if len(parts) > 2 else "2025"
+            course = parts[0]
+            batch = parts[1]
+            year = parts[2]
 
-            # Detect mode from filename
             mode = "Online" if "online" in base.lower() else "Offline"
             print(f"📄 Detected mode: {mode} for file '{file}'")
 
