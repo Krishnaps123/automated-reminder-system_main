@@ -2,55 +2,63 @@
 # ouqx gboz ampr cwjb-alert email
 import os
 import time
-import sqlite3
 import pytz
 import smtplib
+import psycopg2
 import pandas as pd
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
 
 # ============================================================
-# LOAD ENV
+# EMAIL CREDS (RAILWAY VARIABLES)
 # ============================================================
-load_dotenv()
 
-DB_PATH = os.getenv("DB_PATH")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 SENDER_PASS = os.getenv("SENDER_PASS")
 
-if not DB_PATH or not os.path.exists(DB_PATH):
-    raise FileNotFoundError("❌ Database not found")
 if not SENDER_EMAIL or not SENDER_PASS:
-    raise ValueError("❌ Email credentials missing")
+    raise RuntimeError("❌ Email credentials missing")
 
 # ============================================================
 # TIMEZONE
 # ============================================================
+
 IST = pytz.timezone("Asia/Kolkata")
 
 # ============================================================
-# SENT LOG
+# DATABASE CONNECTION (LAZY / RUNTIME SAFE)
 # ============================================================
-SENT_LOG = "sent_email_reminders.log"
+
+def get_connection():
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("❌ DATABASE_URL not found at runtime")
+    return psycopg2.connect(database_url)
+
+# ============================================================
+# SENT REMINDERS (POSTGRESQL - PERSISTENT)
+# ============================================================
 
 def load_sent():
-    if os.path.exists(SENT_LOG):
-        with open(SENT_LOG) as f:
-            return set(line.strip() for line in f)
-    return set()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT reminder_key FROM sent_reminders")
+            return {r[0] for r in cur.fetchall()}
 
-def save_sent(sent):
-    with open(SENT_LOG, "w") as f:
-        for k in sorted(sent):
-            f.write(k + "\n")
-
-sent_reminders = load_sent()
+def mark_sent(key):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sent_reminders (reminder_key) VALUES (%s) ON CONFLICT DO NOTHING",
+                (key,)
+            )
+            conn.commit()
 
 # ============================================================
 # EMAIL FUNCTION
 # ============================================================
+
 def send_email(recipient, subject, body):
     if "@example.com" in recipient.lower():
         return
@@ -65,20 +73,17 @@ def send_email(recipient, subject, body):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
             server.login(SENDER_EMAIL, SENDER_PASS)
             server.send_message(msg)
-
         print(f"📧 Email sent → {recipient}")
-
     except Exception as e:
         print("❌ Email error:", e)
 
 # ============================================================
-# DB HELPERS
+# DB HELPERS (POSTGRESQL + PANDAS)
 # ============================================================
+
 def fetch_df(query):
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+    with get_connection() as conn:
+        return pd.read_sql_query(query, conn)
 
 def get_students():
     df = fetch_df("SELECT * FROM students")
@@ -101,9 +106,10 @@ def get_classes():
 # ============================================================
 # REMINDER LOOP
 # ============================================================
-def send_reminders():
+
+def send_reminders(sent_reminders):
     now = datetime.now(IST)
-    print(f"\n⏰ Checking EMAIL reminders at {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
+    print(f"\n⏰ Checking EMAIL reminders at {now:%Y-%m-%d %H:%M:%S} IST")
 
     reminder_windows = {
         60: (45, 75),
@@ -115,10 +121,7 @@ def send_reminders():
 
     # ===================== CLASS REMINDERS =====================
     for _, row in get_classes().iterrows():
-        class_dt = pd.to_datetime(
-            f"{row['date']} {row['time']}",
-            errors="coerce"
-        )
+        class_dt = pd.to_datetime(f"{row['date']} {row['time']}", errors="coerce")
         if pd.isna(class_dt):
             continue
 
@@ -155,6 +158,7 @@ def send_reminders():
                     f"— Automated Reminder System"
                 )
 
+                mark_sent(key)
                 sent_reminders.add(key)
 
     # ===================== ASSIGNMENT REMINDERS =====================
@@ -163,11 +167,7 @@ def send_reminders():
         if len(raw_due) <= 10:
             raw_due += " 23:59"
 
-        due_dt = pd.to_datetime(
-            raw_due,
-            format="%Y-%m-%d %H:%M",
-            errors="coerce"
-        )
+        due_dt = pd.to_datetime(raw_due, format="%Y-%m-%d %H:%M", errors="coerce")
         if pd.isna(due_dt):
             continue
 
@@ -204,16 +204,17 @@ def send_reminders():
                     f"— Automated Reminder System"
                 )
 
+                mark_sent(key)
                 sent_reminders.add(key)
 
-    save_sent(sent_reminders)
+# ============================================================
+# RUN (WORKER MODE)
+# ============================================================
 
-# ============================================================
-# RUN
-# ============================================================
 if __name__ == "__main__":
     print("📧 Email Reminder Scheduler Started...")
-    while True:
-        send_reminders()
-        time.sleep(30)
+    sent_reminders = load_sent()
 
+    while True:
+        send_reminders(sent_reminders)
+        time.sleep(30)
